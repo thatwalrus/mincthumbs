@@ -1,0 +1,1074 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Tabular ();
+use Cwd;
+#use PDF::API2;  #disabled for now. note that package is not installed on jones or wendell
+
+# TO DO: 
+#  * -autofit scales down sagittals to the appropriate width; or rather, with 
+#    -noautofit, coronals and horizontals will not be scaled to the full width.
+#  * speed optimization?
+# CHANGES
+# 2/7/2008
+#  * Creating individual images (e.g. png or jpg) is now more intuitive. The -explode
+#    option has been renamed to -individual. The -fmt option selects what image type to
+#    write; for now, -fmt only affects the file type in -individual mode.
+#  * When in -individual mode, -dpi sets the pixel length of the longest image dimension.
+#    Note that if your Minc file has dimensions X=256 Y=128 Z=128 and you set -dpi 500,
+#    a sagittal slice will have the dimensions 250x250. This is because the longest
+#    dimension is the X dimension, and the image is scaled accordingly. The intent is to
+#    keep all three slice orientations at the same overall scaling (pixels/voxel). An 
+#    upcoming -autoscale option may override this behavior. 
+#  * Another caveat for the relationship between the -dpi option and output image size, when
+#    running in -individual mode: If slice labels are turned on (i.e. you haven't included
+#    -nolabels), the label will add extra height.
+#  * The -tfloor option is now available. It controls the bottom limit of the color mapping.
+#    If -tfloor is not specified it defaults to -1*tceiling. For register-like coloring of 
+#    positive T values, try setting -tfloor to the same value as -tthresh and including the
+#    -pos option (without -pos you'll still see values below -1*tthresh as areas of purple).
+#  * Color mapping of extreme values has been tweaked slightly. The top of the range is a 
+#    reddish-white (instead of off-white) and the bottom of the range is a dark purple 
+#    (instead of black).
+# 12/19/2007
+#  * Specifying coordinates (e.g. by loading tagfile) currently forces tcs_3h layout mode.
+#  * -nolabels omits image labels (which normally display coordinate and tag text info).
+#  * The full command line is logged to the PDF Title and PNG Caption metadata fields.
+#    In the case of PDF files, this entails a slight performance hit.
+#  * Can read slice locations from a tagfile and display those slices in a new layout 
+#    mode with the three orientations side by side. Also see -maxtags.
+#  * New -eq option performs histogram equalization on the anatomical image, which 
+#    is helpful when bright objects like headphones make the brain appear too dark. 
+#  * Experimental options -contrast and -sharpen give additional control over the 
+#    appearance of the anatomical image.
+#  * The filename of the PDF output file may be specified with the -out option.
+#  * -pos and -neg options specify only positive or negative T values should be shown.
+#  * -nomarks omits slice marks (try setting -tickinterval to 0 for more minimalism)
+#  * -explode skips PDF layout and writes the individual image tiles to PNG images. This
+#    is very useful for making figures.
+#  * In -explode mode the -out parameter may be used to set the output directory, which 
+#    will be created if it does not already exist. 
+#  * -pagebg and -pagetxtcol control the color of the page background and the text.
+#  * Can mask the image from a binarized minc file via -maskimage. A 0.5 threshold is
+#    applied.
+#  * Image axis start/end positions are verified to be equal, otherwise throws error.
+# 12/Mar/2007
+#  * A stats image is now optional - you can create a PDF from only an anatomical.
+#  * The file path is written as a subtitle on each page
+# 8/Mar/2007 
+#  * Proper handling of pagination when a series of images would overflow the page.
+#  * Layout code rewritten to be resolution independent. Main improvements: 
+#    text and ticks should remain crisp; page size and margins are handled properly;
+#    user may choose an appropriate balance of detail vs. file size (and speed) via the 
+#    -dpi option.
+#  * Blending of T values around the threshold is much better. Blending range is 
+#    configurable.
+#  * Anatomicals and functionals needn't be at the same resolution (step size) but
+#    they still must be in the same space (axis cosines and start/end positions).
+
+my $version = 'Rel 12/Mar/2007';
+my $usage = "mincthumbs [options] fmrifile1 [fmrifile2 ....] anatfile";
+my %options = (
+    cmdline => join(' ', $0, @ARGV),
+    tempdir => "/tmp/mincthumbs-$$",
+    tthresh => 3,
+    tceiling => 10,
+    tfloor_user => -99,
+    tfloor => undef,
+    statpolarity => 0,
+    statmaskimage => '',
+    maskasalpha => 0,
+    maskanat => 0,
+    verbose => 1,
+    slicesdefault => 'transverse=5:-60:80;sagittal=5:-70:70;coronal=5:-100:70',
+    slices => '',
+    layoutcols => 6,
+    layoutorder => 'orientseparate',
+    outformat => 'png',
+    fileprefix => '',
+    colorbarfile => '/home/nick/util/mincthumbs_colorbar.mnc',
+    lookuptable => '/home/nick/util/colormap_spectral2.txt',
+    marktvalue => '',
+    tickinterval => 10,  #mm of original image
+    blendmode => 'mask',
+    pagedim => '8.5x11', #inches
+    pagemargin => '0.5', #inches
+    pagedpi => 150,
+    tblendradius => 0.5, #units of t
+    masteropacity => 1,
+    anatsharpen => 0,
+    anatcontrast => 0,
+    anateq => 0,
+    tagfile => '',
+    anatproc => '',
+    pdffile => '',
+    maxtags => 0,
+    no_marks => 0,
+    no_labels => 0,
+    pagebg => 'White',
+    pagetextcolor => '#000',
+    pdfapi2 => 0,
+#    pwd => 0,
+);
+my @argTbl = (
+    ["Image data selection", "section"],
+    ["-slices", "string", 1, \$options{slices},
+     "Which orientations and slices to include. Individual values or an interval notation may be used. Ex: 'orientation1=interval:min:max;orientation2=val1,val2,val3'. Default is '$options{slicesdefault}'. Alternatively, the name of a tagfile can be specified; slices will be chosen based on tag locations."],
+    ["-tthresh", "float", 1, \$options{tthresh},
+     "Threshold value for stats images. Voxels below this value (or for negative -tthresh values, above this value) will be masked to transparent. Note that for aesthetic reasons, it is not an exact cutoff; see -tblendradius."],
+    ["-tceiling", "float", 1, \$options{tceiling},
+     "Maximum absolute T value in the color coding."],
+    ["-tfloor", "float", 1, \$options{tfloor_user},
+     "Minimum absolute T value in the color coding. Usually you will want leave it at the special value -99, which autoscales tfloor to -1*tceiling. To mimic register's color coding, set tfloor equal to tthresh and set tblendradius to 0.001."],
+    ["-maxtags", "integer", 1, \$options{maxtags},
+     "Maximum number of voxel locations to load from a tagfile. A value of zero means unlimited."],
+    ["-pos", "const", 1, \$options{statpolarity},
+     "Only show positive stats values."],
+    ["-neg", "const", -1, \$options{statpolarity},
+     "Only show negative stats values."],
+    ["-maskimage", "string", 1, \$options{statmaskimage},
+     "Mask to load from minc file. Must be in same resolution and space as the stats image. Will be thresholded at 0.5"],
+    
+    ["Image data rendering", "section"],
+    ["-blend", "string", 1, \$options{blendmode},
+     "Blend method: 'screen' or 'mask'."],
+    ["-tblendradius", "float", 1, \$options{tblendradius},
+     "Values around the T threshold are semitransparent, ranging from completely transparent at Tthresh-Tblendradius to completely opaque at Tthresh+Tblendradius. A smaller value makes region edges more crisp/blocky, and a larger value can result in 'wispy' regions. Must not be zero."],
+    ["-sharpen", "const", 1, \$options{anatsharpen},
+     "Sharpen the anatomical image. This option is experimental and likely to change."],
+    ["-contrast", "integer", 1, \$options{anatcontrast},
+     "Increase the contrast of the anatomical image. No processing is applied when the value is 0. This option is experimental and likely to change."],
+    ["-eq", "const", 1, \$options{anateq},
+     "Equalize the levels of the anatomical image (histogram equalization). Helpful when bright objects like headphones make the brain appear too dark. Also clamps low levels to black to avoid brightening low level noise."],
+    ["-opacity", "float", 1, \$options{masteropacity},
+     "Setting this to a value below 1 makes the stats image partially transparent, allowing the anatomical to show through. Valid range is 0-1. This option is experimental and may be removed."],
+    
+    ["Layout/composition", "section"],
+    ["-cols", "integer", 1, \$options{layoutcols},
+     "Number of thumbnails per line."],
+    ["-layout", "string", 1, \$options{layoutorder},
+     "Layout mode. Normally this will be set implicitly based on how slices/coordinates are specified."],
+    ["-individual", "const", 'individualtiles', \$options{layoutorder},
+     "Output individual image files (.png by default; see -fmt). May be abbreviated as -indiv."],
+    ["-tickinterval", "integer", 1, \$options{tickinterval},
+     "Tick spacing (mm). Set to 0 to disable ticks."],
+    ["-markt", "string", 1, \$options{marktvalue},
+     "Mark a particular T value on the colorbar (optional)."],
+    ["-dpi", "integer", 1, \$options{pagedpi},
+     "Desired resolution of PDF file (pixels per inch). In -individual mode, -dpi specifies the pixel length of the longest image dimension."],
+    ["-pagedim", "string", 1, \$options{pagedim},
+     "Page dimensions in inches (WxH)"],
+    ["-pagemargin", "string", 1, \$options{pagemargin},
+     "Page margin in inches"],
+    ["-pagebg", "string", 1, \$options{pagebg},
+     "Page background color"],
+    ["-pagetxtcol", "string", 1, \$options{pagetextcolor},
+     "Page text color"],
+    ["-nomarks", "const", 1, \$options{no_marks},
+     "Omit slice marks."],
+    ["-nolabels", "const", 1, \$options{no_labels},
+     "Omit slice labels."],
+    ["-maskasalpha", "const", 1, \$options{maskasalpha},
+     "Use the mask specified in -maskimage as a raw alpha channel instead of thresholding."],
+    ["-maskanat", "const", 1, \$options{maskanat},
+     "Use the mask for the anatomical image as well."],
+
+    ["-anatproc", "string", 1, \$options{anatproc},
+     "Experimental."],
+
+    ["Output", "section"],
+    ["-out", "string", 1, \$options{pdffile},
+     "Destination PDF file (optional). In -individual mode, -out specifies the output directory (it will be created if necessary)."],
+    ["-fmt", "string", 1, \$options{outformat},
+     "In -individual mode, -fmt specifies the output format (png, jpg, gif, tiff)."],
+    ["-prefix", "string", 1, \$options{fileprefix},
+     "An optional prefix for the name of output files"],
+    
+
+    ["Other", "section"],
+    ["-explode", "const", 'individualtiles', \$options{layoutorder},
+     "(Deprecated. Synonym for -individual)"],
+#    ["-pdfapi2", "const", 1, \$options{pdfapi2},
+#     ""],
+#    ["-pwd", "boolean", 1, \$options{pwd},
+#     "Include full path for files in current directory."],
+    ["-q", "const", 0, \$options{verbose},
+     "Quiet output (only print errors)."],
+    ["-v", "const", 2, \$options{verbose},
+     "Verbose output."],
+    ["-version", "const", -10, \$options{verbose},
+     "Display program version and exit."],
+);
+
+#### get and manipulate command line options
+my @simg = ();
+print "$usage\n\n" if (grep /\s-help\b/, @ARGV);
+Getopt::Tabular::GetOptions(\@argTbl, \@ARGV, \@simg) or die "\n";
+# version
+if ($options{verbose} == -10) {
+    print "Version: $version\n\n";
+    exit;
+}
+# tthresh must be positive
+$options{tthresh} = abs($options{tthresh});
+# tfloor = -1*tceiling by default
+if ($options{tfloor_user} != -99) {
+    $options{tfloor} = $options{tfloor_user};
+} else {
+    $options{tfloor} = -1 * $options{tceiling};
+}
+# outformat must be png unless -individual mode
+$options{outformat} = 'png' unless ($options{layoutorder} eq 'individualtiles');
+
+
+my $errs = 0;
+foreach (@simg) { #includes anatomical at this point
+    unless (-f $_) {
+        $errs++;
+        print "File $_ does not exist\n";
+    }
+}
+die "\n" if ($errs > 0);
+die "$usage\n" unless (@simg >= 1);
+my $aimg = pop @simg;
+
+## this requires more thought --- masking anatomical image
+#if (0  and  $options{statmaskimage} and  $options{maskanat}) {
+#    #print "MASKING from $options{statmaskimage}\n";
+#    if ($options{maskasalpha}) {  # alpha-$tiledef->{orient}-$tiledef->{statslice}.png
+#        runcmd(sprintf q(minccalc -quiet -clobber -byte -expression 'A[0]>1? A[1] : A[0]<0? 0 : A[0]*A[1]' '%s' '%s/alpha.mnc' '%s/alpha2.mnc'), $options{statmaskimage}, $tempdir, $tempdir);
+#    } else {
+#        runcmd(sprintf q(minccalc -quiet -clobber -byte -expression 'A[0] > 0.5? A[1] : 0' '%s' '%s/alpha.mnc' '%s/alpha2.mnc'), $options{statmaskimage}, $tempdir, $tempdir);
+#    }
+#    #exit;
+#    runcmd(qq(cp '$tempdir/alpha2.mnc' '$tempdir/alpha.mnc'));
+#}
+
+
+if ($options{outfile} and scalar(@simg)>1) {
+    die "The output filename cannot be set via -out when there is more than one stats image to be processed\n";
+}
+
+# misc globals
+my ($cmd);
+my $_progressmarks = 0;
+
+# initialize slice lists and other slice/orientation related variables
+$options{slices} ||= $options{slicesdefault};
+my %orients = (
+    coronal    => {mainaxis=>'yspace', h => ['xspace',1], v => ['zspace',-1]}, 
+    sagittal   => {mainaxis=>'xspace', h => ['yspace',1], v => ['zspace',-1]}, 
+    transverse => {mainaxis=>'zspace', h => ['xspace',1], v => ['yspace',-1]}, 
+);
+my %axismmdimensions = (anat=>{}, overlay=>{});
+@_ = split /x/, $options{pagedim};
+my %slicelist = (map {$_=>[]} keys %orients);  # the slice locations will be in mm - they're not integer slice indexes
+my %slices_ix = (anat=>{}, overlay=>{});
+my @orient_wanted = ();
+
+# calculate some layout values
+my %layout = (
+    px => {
+        pagew => $_[0]*$options{pagedpi},
+        pageh => $_[1]*$options{pagedpi},
+        contentw => ($_[0] - 2*$options{pagemargin})*$options{pagedpi},
+        contenth => ($_[1] - 2*$options{pagemargin})*$options{pagedpi},
+        contentxoff => $options{pagemargin}*$options{pagedpi},
+        contentyoff => $options{pagemargin}*$options{pagedpi},
+        montageyextra => round($options{pagedpi}*3/8),
+        tilew => int(($_[0] - 2*$options{pagemargin})*$options{pagedpi}/$options{layoutcols}),
+        textspliceh => ($options{no_labels}? 0 : round(14/72*2/3*$options{pagedpi})), #round(14/72*$options{pagedpi}),
+        strokewidth => round($options{pagedpi}/90),
+        strokelengthmajor => round($options{pagedpi}/20),
+        strokelengthminor => round($options{pagedpi}/50),
+    },
+);
+
+# enumerate slices
+my @tags = ();
+if (-f $options{slices}) {
+    die "-cols must be a multiple of 3 when loading tags\n"  if ($options{layoutcols} % 3);
+    @tags = tags_read($options{slices});
+    printf "Read %u tags from %s\n", scalar(@tags), $options{slices};
+    $options{layoutorder} = 'tcs_3h' unless ($options{layoutorder} eq 'individualtiles');
+    $slicelist{labels} = [];
+    foreach my $tag (@tags) {
+        push @{$slicelist{transverse}}, $tag->[2];
+        push @{$slicelist{coronal}}, $tag->[1];
+        push @{$slicelist{sagittal}}, $tag->[0];
+        push @{$slicelist{labels}}, sprintf('%i  %i  %i   %.10s', $tag->[0], $tag->[1], $tag->[2], $tag->[6]);
+    }
+    @orient_wanted = qw(transverse coronal sagittal);
+} else {
+    foreach (split /;\s*/, $options{slices}) {
+        @_ = split /[=:,]\s*/, $_;
+        if ($_[0] eq 'coord') {
+            $options{layoutorder} = 'tcs_3h' unless ($options{layoutorder} eq 'individualtiles'); # 'tcs_2x2';
+            push @tags, [@_[1,2,3]];
+            push @{$slicelist{transverse}}, $_[3];
+            push @{$slicelist{coronal}}, $_[2];
+            push @{$slicelist{sagittal}}, $_[1];
+            push @{$slicelist{labels}}, sprintf('%i  %i  %i', $_[1], $_[2], $_[3]);
+            @orient_wanted = qw(transverse coronal sagittal);
+        } 
+        elsif ($orients{$_[0]}) {
+            push @orient_wanted, $_[0];
+            if (/:/) {
+                $slicelist{$_[0]} = [numseries(@_[2,3,1])];
+            } else {
+                $slicelist{$_[0]} = [@_[1..$#_]];
+            }
+            vprintf(2, "$_[0] slices: " . join(',',@{$slicelist{$_[0]}}) . "\n");
+        }
+        else {
+            die "$_[0] is not a valid slice orientation\n";
+        }
+    }
+}
+
+load_filedimensions($aimg,\%slicelist, 'anat');
+
+# SET UP LAYOUT PIXEL DIMENSIONS IN CHOSEN ORIENTATION(S), BASED ON ANATOMICAL IMAGE DIMENSIONS
+# need to do this before build colorbar (?)
+if ($options{layoutorder} eq 'individualtiles') {
+    my $orient_maxw = (sort {$b <=> $a} map {$axismmdimensions{anat}{$orients{$_}{h}[0]}{num}*$axismmdimensions{anat}{$orients{$_}{h}[0]}{step}} keys %orients)[0];
+    my $orient_maxh = (sort {$b <=> $a} map {$axismmdimensions{anat}{$orients{$_}{v}[0]}{num}*$axismmdimensions{anat}{$orients{$_}{v}[0]}{step}} keys %orients)[0];
+    my $scalefactor = $options{pagedpi} / (sort {$b <=> $a} ($orient_maxw, $orient_maxh))[0];
+    $layout{px}{tileh} = $options{pagedpi}; #round($orient_maxh * $scalefactor);
+    foreach my $orient (@orient_wanted) {
+        my $h = $orients{$orient}{h};
+        my $v = $orients{$orient}{v};
+        $layout{px}{orienttileh}{$orient} = round($axismmdimensions{anat}{$v->[0]}{num}*$axismmdimensions{anat}{$v->[0]}{step} * $scalefactor);
+        $layout{px}{orienttilew}{$orient} = round($axismmdimensions{anat}{$h->[0]}{num}*$axismmdimensions{anat}{$h->[0]}{step} * $scalefactor);
+    }    
+}
+elsif ($options{layoutorder} eq 'tcs_3h') {
+    # adjacent transverse, coronal, sagittal slices
+    my $orient_maxw = (sort {$b <=> $a} map {$axismmdimensions{anat}{$orients{$_}{h}[0]}{num}*$axismmdimensions{anat}{$orients{$_}{h}[0]}{step}} keys %orients)[0];
+    my $orient_maxh = (sort {$b <=> $a} map {$axismmdimensions{anat}{$orients{$_}{v}[0]}{num}*$axismmdimensions{anat}{$orients{$_}{v}[0]}{step}} keys %orients)[0];
+    my $scalefactor = $layout{px}{tilew} / $orient_maxw;
+    $layout{px}{tileh} = round($orient_maxh * $scalefactor);
+    foreach my $orient (@orient_wanted) {
+        my $h = $orients{$orient}{h};
+        my $v = $orients{$orient}{v};
+        $layout{px}{orienttileh}{$orient} = round($axismmdimensions{anat}{$v->[0]}{num}*$axismmdimensions{anat}{$v->[0]}{step} * $scalefactor);
+        $layout{px}{orienttilew}{$orient} = round($axismmdimensions{anat}{$h->[0]}{num}*$axismmdimensions{anat}{$h->[0]}{step} * $scalefactor);
+    }    
+}
+elsif ($options{layoutorder} eq 'tcs_2x2') {
+    # adjacent transverse, coronal, sagittal slices
+    my $orient_maxw = (sort {$b <=> $a} map {$axismmdimensions{anat}{$orients{$_}{h}[0]}{num}*$axismmdimensions{anat}{$orients{$_}{h}[0]}{step}} keys %orients)[0];
+    my $orient_maxh = (sort {$b <=> $a} map {$axismmdimensions{anat}{$orients{$_}{v}[0]}{num}*$axismmdimensions{anat}{$orients{$_}{v}[0]}{step}} keys %orients)[0];
+    my $scalefactor = $layout{px}{tilew} / $orient_maxw;
+    $layout{px}{tileh} = round($orient_maxh * $scalefactor);
+    foreach my $orient (@orient_wanted) {
+        my $h = $orients{$orient}{h};
+        my $v = $orients{$orient}{v};
+        $layout{px}{orienttileh}{$orient} = round($axismmdimensions{anat}{$v->[0]}{num}*$axismmdimensions{anat}{$v->[0]}{step} * $scalefactor);
+        $layout{px}{orienttilew}{$orient} = round($axismmdimensions{anat}{$h->[0]}{num}*$axismmdimensions{anat}{$h->[0]}{step} * $scalefactor);
+    }    
+}
+elsif ($options{layoutorder} eq 'subjects' or $options{layoutorder} eq 'orientseparate') {
+    # orientations organized into separate sections
+    foreach my $orient (@orient_wanted) {
+        my $h = $orients{$orient}{h};
+        my $v = $orients{$orient}{v};
+        $layout{px}{orienttileh}{$orient} = round($layout{px}{tilew} / ($axismmdimensions{anat}{$h->[0]}{num}*$axismmdimensions{anat}{$h->[0]}{step}) * ($axismmdimensions{anat}{$v->[0]}{num}*$axismmdimensions{anat}{$v->[0]}{step}));
+        $layout{px}{orienttilew}{$orient} = $layout{px}{tilew};
+    }
+}
+else {
+    die "Unknown layout order '$options{layoutorder}'\n";
+}
+
+# set up temp directory
+if (-d $options{tempdir}) {
+    runcmd("rm -f '$options{tempdir}/*'");
+} else {
+    mkdir($options{tempdir}) or die;
+}
+
+if ($options{layoutorder} eq 'individualtiles') {
+    if ($options{pdffile}) {
+        runcmd(qq(mkdir -p '$options{pdffile}'));
+    } else {
+        $options{pdffile} = '.';
+    }
+}
+
+# dump anatomical slices
+vprintf(1, "Reading anatomical image: $aimg\n");
+foreach my $orient (@orient_wanted) {
+    vprintf(1, " Orientation: $orient\n");
+    for (my $i = 0; $i <= $#{$slices_ix{anat}{$orient}}; $i++) {
+        #print "ANAT $orient SLICE $slices_ix{anat}{$orient}[$i]{ix}\n";
+        runcmd(qq(mincpik -$orient -slice $slices_ix{anat}{$orient}[$i]{ix} -scale 1 '$aimg' '$options{tempdir}/anat-$orient-$i.png'));
+    }
+}
+
+# set up parameters for coloring the stats overlay and colorbar
+$layout{colorparams} = build_colorbar();
+
+# load dimensions from stats images and create alpha images for threshold masks
+my @imagefiledefs = (
+    # first one is anatomical
+    {
+        type => 'anat',
+        file => $aimg,
+        mmdimensions => $axismmdimensions{anat},
+        slices => $slices_ix{anat},
+    },
+);
+if (@simg) {
+    # dump stats images and create pdf montages
+    my $simgix = 0;
+    foreach my $simg (@simg) {
+        vprintf(1, "Reading stats image: $simg\n");
+        my $key = "overlay$simgix";
+        load_filedimensions($simg,\%slicelist,$key);
+        #my %outfiles = ();
+        
+        my $tempdir = "$options{tempdir}/$simgix";
+        runcmd("mkdir -p $tempdir");
+        
+        # generate alpha channel
+        if ($options{statpolarity} != 0) {
+            runcmd(sprintf q(minccalc -quiet -clobber -byte -expression 'clamp((A[0]*%i - %f)/%f,0,1)*%f' '%s' '%s/alpha.mnc'), $options{statpolarity}, ($options{tthresh} - $options{tblendradius}), $options{tblendradius}*2, $options{masteropacity}, $simg, $tempdir);
+        } else {
+            runcmd(sprintf q(minccalc -quiet -clobber -byte -expression 'clamp((abs(A[0]) - %f)/%f,0,1)*%f' '%s' '%s/alpha.mnc'), ($options{tthresh} - $options{tblendradius}), $options{tblendradius}*2, $options{masteropacity}, $simg, $tempdir);
+        }
+        if ($options{statmaskimage}) {
+            #print "MASKING from $options{statmaskimage}\n";
+            if ($options{maskasalpha}) {  # alpha-$tiledef->{orient}-$tiledef->{statslice}.png
+                runcmd(sprintf q(minccalc -quiet -clobber -byte -expression 'A[0]>1? A[1] : A[0]<0? 0 : A[0]*A[1]' '%s' '%s/alpha.mnc' '%s/alpha2.mnc'), $options{statmaskimage}, $tempdir, $tempdir);
+            } else {
+                runcmd(sprintf q(minccalc -quiet -clobber -byte -expression 'A[0] > 0.5? A[1] : 0' '%s' '%s/alpha.mnc' '%s/alpha2.mnc'), $options{statmaskimage}, $tempdir, $tempdir);
+            }
+            #exit;
+            runcmd(qq(cp '$tempdir/alpha2.mnc' '$tempdir/alpha.mnc'));
+        }
+
+        push @imagefiledefs, {
+                type => 'overlay',
+                file => $simg,
+                mmdimensions => $axismmdimensions{$key},
+                slices => $slices_ix{$key},
+                alphamnc => "$tempdir/alpha.mnc",
+                key => $key,
+        };
+    }
+} else {
+
+if (1) {
+    # dump stats images and create pdf montages
+    my $tempdir = "$options{tempdir}/anat";
+    runcmd("mkdir -p $tempdir");
+        
+    push @imagefiledefs, {
+            #type => 'overlay',
+            file => $aimg,
+            mmdimensions => $axismmdimensions{anat},
+            slices => $slices_ix{anat},
+            #alphamnc => "$tempdir/alpha.mnc",
+            #key => $key,
+    };
+}
+}
+
+# build entire layout, generate output
+build_layout(@imagefiledefs);
+
+# clean up
+runcmd("rm -rf '$options{tempdir}'");
+
+# DONE
+
+
+sub build_pdf {
+    my $pdffile = shift;
+    my @outpages = @_;
+
+    my $hist = $options{cmdline};
+    $hist =~ s/'/\\'/g;
+    runcmd("convert -density $options{pagedpi} -adjoin " . join(" ", @outpages) . " -set Title '$hist' $options{tempdir}/ALL-mont.ps");
+    open my($fh), "$options{tempdir}/ALL-mont.ps" or die $!;
+    open my($fh2), '>', "$options{tempdir}/ALL-mont2.ps" or die $!;
+    while (<$fh>) {
+        if (/^\%\%Title:/) {
+            print $fh2 "\%\%Title: $hist\n";
+            print $fh2 (<$fh>);
+        } else {
+            print $fh2 $_;
+        }
+    }   
+    close $fh;
+    close $fh2;
+    runcmd(sprintf q(ps2pdf -dPDFSETTINGS=/prepress -dDEVICEWIDTHPOINTS=%u -dDEVICEHEIGHTPOINTS=%u '%s/ALL-mont2.ps' '%s'), $layout{px}{pagew}/$options{pagedpi}*72, $layout{px}{pageh}/$options{pagedpi}*72, $options{tempdir}, $pdffile);
+    # To do a lossless compression of the images, I used:  ps2pdf -dAutoFilterColorImages=false -dColorImageFilter=/FlateEncode
+    # 
+    # To be able to finely control the compression of the images, I had to come up with an incantation similar to the following, which should all be on one line (to convert ABC.ps to ABC.pdf):
+    # cat ABC.ps | gs -sDEVICE=pdfwrite -sOutputFile=ABC.pdf -dAutoFilterColorImages=false -c "<< /ColorImageDict << /QFactor 0.1 /Blend 1 /HSample [1 1 1 1] /VSample [1 1 1 1] >> >> setdistillerparams" -
+    # 
+    # Adjusting the QFactor away from 0.1 adjusts the quality of compression, but I don't know what range of values it can take (although 0.9 is default).
+    # 
+    # For some partially helpful information, see   http://casper.ghostscript.com/~ghostgum/pdftips.htm
+    # and   http://www.cs.wisc.edu/~ghost/doc/cvs/Ps2pdf.htm
+}
+
+sub build_layout {
+    my @imagefiledefs = @_;
+    
+    # define
+    my $layout = {files => []};
+
+    my @sectiondefs = ();
+    my ($tilew,$tileh);
+    if ($options{layoutorder} eq 'tcs_3h' or @tags) {
+        my $aimgdef = shift @imagefiledefs;
+        @imagefiledefs = ($aimgdef) unless (@imagefiledefs);
+        foreach my $simgdef (@imagefiledefs) {
+            my $filedef = { simg=>$simgdef, aimg=>$aimgdef, sectiondefs=>[] };
+            $tilew = $layout{px}{tilew};
+            my $orient_maxw = (sort {$b <=> $a} map {$orients{$_}{h}} keys %orients)[0];
+            my $orient_maxh = (sort {$b <=> $a} map {$orients{$_}{v}} keys %orients)[0];
+            my $scalefactor = $tilew / $orient_maxw;
+            
+            my $tileh = $orient_maxh * $scalefactor;
+    
+            my $sectiondef = {
+                name => 'Tags',
+                inputfile => $simgdef->{file},
+                tiles => [],
+                # subtract an entire row so we keep images for tag locations together and still have space for colorbar:
+                tilesperpage => $options{layoutcols} * int(($layout{px}{contenth} - $layout{px}{montageyextra})/($tileh + $layout{px}{textspliceh} + 4) - 1), 
+                tilealign => 'South',
+                addcolorbar => ($simgdef->{type} eq 'overlay'? 1:0),
+              };
+            for (my $i=0; $i <= $#tags; $i++) {
+                foreach my $orient (@orient_wanted) {
+                    my $thistileh = $layout{px}{orienttileh}{$orient}; #$orients{$orient}{v} * $scalefactor;
+                    my $thistilew = $layout{px}{orienttilew}{$orient}; #$orients{$orient}{h} * $scalefactor;
+        
+                    my $tile = {
+                        label => $slicelist{labels}[$i],
+                        colorparams => $layout{colorparams},
+                        anatpng => "$options{tempdir}/anat-$orient-$i.png",
+                        orient => $orient,
+                        worldpos => $slices_ix{anat}{$orient}[$i]{mm},
+                        pxw => $thistilew,
+                        pxh => $thistileh,
+                        ticksdraw => maketicksdrawstring($orient,$thistilew,$thistileh,$tags[$i]),
+                        parentsection => $sectiondef,
+                        parentfile => $filedef,
+                      };
+                    if ($simgdef->{type} eq 'overlay') {
+                        # it's a stats image so add info needed for overlay
+                        $tile->{statmnc} = $simgdef->{file};
+                        $tile->{statalpha} = $simgdef->{alphamnc};
+                        $tile->{statslice} = $slices_ix{$simgdef->{key}}{$orient}[$i]{ix};
+                    }
+                    push @{$sectiondef->{tiles}}, $tile;
+                }            
+            }
+                push @{$filedef->{sections}}, $sectiondef;
+            push @{$layout->{files}}, $filedef;
+        }
+    } 
+    elsif ($options{layoutorder} eq 'orientseparate'  or  $options{layoutorder} eq 'individualtiles') {
+        my $aimgdef = shift @imagefiledefs;
+        foreach my $simgdef (@imagefiledefs) {
+            my $filedef = { simg=>$simgdef, aimg=>$aimgdef, sectiondefs=>[] };
+            foreach my $orient (@orient_wanted) {
+                $tilew = $layout{px}{orienttilew}{$orient};
+                $tileh = $layout{px}{orienttileh}{$orient};
+    
+                my $sectiondef = {
+                    name => $orient,
+                    inputfile => $simgdef->{file},
+                    tiles => [],
+                    tilesperpage => $options{layoutcols} * int(($layout{px}{contenth} - $layout{px}{montageyextra})/($tileh + $layout{px}{textspliceh} + 4)) - ($simgdef->{type} eq 'anat'? 0:1), # subtract 1 to allow space for colorbar on each page
+                    tilealign => 'Center',
+                    addcolorbar => ($simgdef->{type} eq 'overlay'? 1:0),
+                  };
+    
+                for (my $i=0; $i <= $#{$slices_ix{anat}{$orient}}; $i++) {
+                    my $tile = {
+                        label => sprintf('%s =  %s', uc(substr($orients{$orient}{mainaxis},0,1)), $slices_ix{anat}{$orient}[$i]{mm}),
+                        colorparams => $layout{colorparams},
+                        anatpng => "$options{tempdir}/anat-$orient-$i.png",
+                        orient => $orient,
+                        worldpos => $slices_ix{anat}{$orient}[$i]{mm},
+                        pxw => $tilew,
+                        pxh => $tileh,
+                        ticksdraw => maketicksdrawstring($orient,$tilew,$tileh),
+                        parentsection => $sectiondef,
+                        parentfile => $filedef,
+                      };
+                    if ($simgdef->{type} eq 'overlay') {
+                        # it's a stats image that will need to be overlaid
+                        $tile->{statmnc} = $simgdef->{file};
+                        $tile->{statalpha} = $simgdef->{alphamnc}; #"$options{tempdir}/alpha.mnc";
+                        $tile->{statslice} = $slices_ix{$simgdef->{key}}{$orient}[$i]{ix};
+                        #print "TILE $i SLICE $tile->{statslice}\n";
+                    }
+                    push @{$sectiondef->{tiles}}, $tile;
+                }       
+                
+                push @{$filedef->{sections}}, $sectiondef;
+            }
+            push @{$layout->{files}}, $filedef;
+        }
+    }
+    else {
+        die "Unknown layout order '$options{layoutorder}'\n";
+    }
+    
+    # individualtiles? copy colorbar
+    if ($options{layoutorder} eq 'individualtiles') {
+        if ($options{outformat} eq 'png') {
+            runcmd(qq(cp $options{tempdir}/colorbar.png $options{pdffile}/));
+        } else {
+            runcmd(qq(convert $options{tempdir}/colorbar.png $options{pdffile}/colorbar.$options{outformat}));
+        }
+    }
+
+    # build
+    if ($options{pdfapi2}) {
+        # VERY BETA!
+
+        foreach my $filedef (@{$layout->{files}}) {
+            if ($options{pdffile}) { 
+                $filedef->{outfile} = $options{pdffile};
+            } else {
+                $filedef->{outfile} = $options{fileprefix} . ($filedef->{simg}{file} || $filedef->{aimg}{file});
+                $filedef->{outfile} =~ s/.mnc$/_thumbs.pdf/ or die;
+            }
+    
+            my $pdf = PDF::API2->new(-file => $filedef->{outfile});
+            
+            $pdf->preferences(
+                -singlepage => 1,
+                -thumbs => 0,
+                -fith => 1,
+            );
+            
+            foreach my $sectiondef (@{$filedef->{sections}}) {
+                foreach my $outpage (build_section($sectiondef)) {
+                    my $page = $pdf->page;
+                    $page->mediabox( $layout{px}{pagew}/$options{pagedpi}*72, $layout{px}{pageh}/$options{pagedpi}*72 );
+                    # Crop size needs to specified as slightly less then media or your'll get ink on the rollers.
+                    #$page->cropbox( 5/mm, 5/mm, 287/mm, 200/mm);
+print "OUTPAGE $outpage\n";    
+                    my $jpeg = $pdf->image_jpeg($outpage);
+    
+                    my $gfx = $page->gfx;
+                    #$gfx->image($jpeg,0,0,72/$options{pagedpi});
+                    $gfx->image($jpeg,0,0,72/$options{pagedpi});
+                }
+            }
+            vprintf(1,"Writing final document\n");
+
+            $pdf->save();
+        }
+    } else {
+        foreach my $filedef (@{$layout->{files}}) {
+            if ($options{pdffile}) { 
+                $filedef->{outfile} = $options{pdffile};
+            } else {
+                $filedef->{outfile} = $filedef->{simg}{file} || $filedef->{aimg}{file};
+                $filedef->{outfile} =~ s/.mnc$/_thumbs.pdf/ or die;
+            }
+    
+            my @outpages = ();
+            foreach my $sectiondef (@{$filedef->{sections}}) {
+                push @outpages, build_section($sectiondef);
+            }
+            unless ($options{layoutorder} eq 'individualtiles') {
+                vprintf(1,"Writing final document\n");
+                build_pdf($filedef->{outfile},@outpages);
+            }
+        }
+    }
+}
+
+sub build_section {
+    my $sectiondef = shift;
+    my ($outfile,$label,$page_filename);
+
+    vprintf(1, " Section: $sectiondef->{name}\n");
+
+    my $tiles = 0;
+    my $currentpage = 1;
+    my @outpages = ();
+    my $pagetiles = [];
+    my @tileslist = @{$sectiondef->{tiles}};
+    while (my $tile = shift @tileslist) {
+        $tiles++;
+        $tile->{outfile} = "$options{tempdir}/tile-$tiles.png";
+        
+        push @{$pagetiles}, $tile;
+
+        if (scalar(@{$pagetiles}) >= $sectiondef->{tilesperpage} or (scalar(@{$pagetiles}) > 0 and not @tileslist)) {
+            $page_filename = "$options{tempdir}/montage-$sectiondef->{name}-$currentpage.jpg";
+            push @{$pagetiles}, {outfile=>"$options{tempdir}/colorbar.png",rendered=>1}  if ($sectiondef->{addcolorbar});
+            my @titles = getfileandpath($sectiondef->{inputfile});
+            build_page(outfile=>$page_filename,sectiondef=>$sectiondef,title=>$titles[0],subtitle=>$titles[1],tiledefs=>$pagetiles);
+            push @outpages, $page_filename;
+            $pagetiles = [];
+            $currentpage++;
+            $tiles = 0;
+        }
+        
+    }
+    return @outpages;
+}
+
+sub build_tile {
+    my $tiledef = {rendered=>0, @_};
+
+}
+
+sub render_tile {
+    my $tiledef = shift;
+
+    if ($tiledef->{statmnc}) {
+        #print "TMAP $tiledef->{orient} SLICE $tiledef->{statslice}\n";
+        # dump stats slice
+        $tiledef->{statpng} = "$options{tempdir}/stat-$tiledef->{orient}-$tiledef->{statslice}.png";
+        runcmd(qq(mincpik -clobber -$tiledef->{orient} -slice $tiledef->{statslice} -scale 1 $tiledef->{colorparams} '$tiledef->{statmnc}' '$tiledef->{statpng}'));
+        # dump alpha slice
+        $tiledef->{statalphapng} = "$options{tempdir}/alpha-$tiledef->{orient}-$tiledef->{statslice}.png";
+        runcmd(qq(mincpik -clobber -$tiledef->{orient} -slice $tiledef->{statslice} -scale 1 -image_range 0 1 '$tiledef->{parentfile}{simg}{alphamnc}' '$tiledef->{statalphapng}'));
+    }
+    my $statcomp = '';
+    if ($tiledef->{statpng} and $tiledef->{statalphapng}) {
+        # composite
+        if ($options{blendmode} eq 'screen') {
+            $statcomp = qq(\\( '$options{tempdir}/stat-$tiledef->{orient}-$tiledef->{statslice}.png' -resize $tiledef->{pxw}x$tiledef->{pxh}! \\) \\( '$options{tempdir}/alpha-$tiledef->{orient}-$tiledef->{statslice}.png' -resize $tiledef->{pxw}x$tiledef->{pxh}! \\) -compose screen -composite);
+        } 
+        elsif ($options{blendmode} eq 'mask') {
+            $statcomp = qq(\\( '$options{tempdir}/stat-$tiledef->{orient}-$tiledef->{statslice}.png' -resize $tiledef->{pxw}x$tiledef->{pxh}! \\) \\( '$options{tempdir}/alpha-$tiledef->{orient}-$tiledef->{statslice}.png' -resize $tiledef->{pxw}x$tiledef->{pxh}! \\) -composite);
+        }
+        else {
+            die "Blend mode '$options{blendmode}' not recognized!\n";
+        }
+        
+    }
+    
+    my $extraanatproc = '';
+    $extraanatproc .= '-black-threshold 800 -equalize ' if ($options{anateq});
+    foreach (1..$options{anatcontrast}) {
+        $extraanatproc .= '-contrast ';
+    }
+    $extraanatproc .= '-unsharp 2x2+1 ' if ($options{anatsharpen});
+
+    if ($options{no_labels}) {
+        $tiledef->{labeldraw} = '';
+    } else {
+        $tiledef->{labeldraw} = qq(-gravity South -background $options{pagebg} -splice 0x$layout{px}{textspliceh} -stroke none -fill '$options{pagetextcolor}' -pointsize 7 -draw "text 0,0 '$tiledef->{label}'");
+    }        
+
+    if ($options{blendmode} eq 'screen') {
+        $cmd = qq(convert -density $options{pagedpi} $tiledef->{anatpng} -resize $tiledef->{pxw}x$tiledef->{pxh} $options{anatproc} -normalize -level 2% $extraanatproc -modulate 70 $extraanatproc $statcomp $tiledef->{ticksdraw} $tiledef->{labeldraw} $tiledef->{outfile});
+    } 
+    elsif ($options{blendmode} eq 'mask') {
+        $cmd = qq(convert -density $options{pagedpi} $tiledef->{anatpng} $options{anatproc} $extraanatproc -resize $tiledef->{pxw}x$tiledef->{pxh} $statcomp $tiledef->{ticksdraw} $tiledef->{labeldraw} $tiledef->{outfile});
+    }
+    else {
+        die "Blend mode '$options{blendmode}' not recognized!\n";
+    }
+    runcmd($cmd);
+    $tiledef->{rendered} = 1;
+}
+
+sub build_page {
+    my %pagedef = (@_);
+    #my $outfile = shift;
+    #my $sectiondef = shift;
+    #my $title = shift;
+    #my $subtitle = shift;
+    $pagedef{tilefiles} = [];
+    if ($pagedef{tiledefs}) {
+        foreach my $tiledef (@{$pagedef{tiledefs}}) {
+            render_tile($tiledef) unless ($tiledef->{rendered});
+            push @{$pagedef{tilefiles}}, $tiledef->{outfile};
+
+            #individualtiles?
+            if ($options{layoutorder} eq 'individualtiles') {
+                next if ($tiledef->{outfile} =~ /colorbar.png/);
+                my $destfile = sprintf '%s/%s%s__%s_%s.%s', 
+                        $options{pdffile}, 
+                        $options{fileprefix},
+                        (($tiledef->{parentfile}{simg}{file}||$tiledef->{parentfile}{aimg}{file}) =~ m|([^/]+)\.[^\.]+$|i)[0] ||'', 
+                        $tiledef->{orient}, 
+                        $tiledef->{worldpos},
+                        $options{outformat};
+                print "INDIV FILE $destfile\n";
+                #runcmd(qq(cp $tiledef->{outfile} $destfile));
+                my $hist = $options{cmdline};
+                $hist =~ s/'/\\'/g;
+                runcmd(qq(convert $tiledef->{outfile} -set Caption '$hist' $destfile));
+            }
+        }
+    }
+    return if ($options{layoutorder} eq 'individualtiles');
+
+    vprintf(1,"  Building output page\n");
+    runcmd("montage -background $options{pagebg} -gravity $pagedef{sectiondef}->{tilealign} -tile $options{layoutcols}x -geometry +1+4  " . join(" ", @{$pagedef{tilefiles}}) . qq( $pagedef{outfile}));
+    my $montageyoff = $layout{px}{montageyextra} + $layout{px}{contentyoff};
+    my $pagesubtitleyoff = round($layout{px}{montageyextra}*0.55 + $layout{px}{contentyoff});
+    runcmd(qq(convert -density $options{pagedpi} -size $layout{px}{pagew}x$layout{px}{pageh} xc:$options{pagebg} -fill '$options{pagetextcolor}' -pointsize 12 -draw "image Over $layout{px}{contentxoff},$montageyoff 0,0 '$pagedef{outfile}' gravity North text 0,$layout{px}{contentyoff} '$pagedef{title}'" -pointsize 7 -draw "gravity North text 0,$pagesubtitleyoff '$pagedef{subtitle}'" '$pagedef{outfile}'));
+}
+
+sub runcmd {
+    my $cmd = shift;
+    vprintf(2, "$cmd\n");
+    system($cmd);
+    die "Died while running '$cmd'\n" if ($?);
+}
+
+sub numseries {
+    my $start = shift;
+    my $end = shift;
+    my $interval = shift;
+    die if ($start > $end);
+    my @series = ($start);
+    while ($series[-1] <= $end) {
+        push @series, $series[-1] + $interval;
+    }
+    # last one was beyond $end, so...
+    pop @series;
+    return @series;
+}
+
+sub vprintf {
+    my $verbositylevel = shift;
+    if ($verbositylevel <= $options{verbose}) {
+        print "\n" if ($_progressmarks);
+        if ($#_ > 0) {
+            printf (@_);
+        } else {
+            print $_[0];
+        }
+        $_progressmarks = 0;
+    } else {
+        vprintprogress();
+    }
+}
+
+sub vprintprogress {
+return;
+    if ($options{verbose} == 1) {
+        print ".";
+        $_progressmarks++;
+    }
+}
+
+sub load_filedimensions {
+    my $filename = shift;
+    my $slicesref = shift;
+    my $targetkey = shift;
+    
+    my $mincinfoout = `mincinfo '$filename'`;
+    
+    my ($orient,$step,$start,$num,$end);
+    foreach $orient (keys %orients) {
+        ($num,$step,$start) = ($mincinfoout =~ /^\s+$orients{$orient}{mainaxis}\s+(\d+)\s+([-0-9]+)\s+([-0-9]+)/m);
+        $end = $start+$num*$step;
+        if ($targetkey ne 'anat'  and  exists $axismmdimensions{anat}) {
+            # verify that this image is in exactly the same space (not checking cosines though - just start and end)
+            my $same = 1;
+            $same &&=  ($start == $axismmdimensions{anat}{$orients{$orient}{mainaxis}}{start});
+            $same &&=  ($end == $axismmdimensions{anat}{$orients{$orient}{mainaxis}}{end});
+            unless ($same) {
+                die "ERROR Image's $orient dimension differs from the anatomical: start $start vs $axismmdimensions{anat}{$orients{$orient}{mainaxis}}{start}; end $end vs $axismmdimensions{anat}{$orients{$orient}{mainaxis}}{end}\n";
+            }
+        }
+        $axismmdimensions{$targetkey}{$orients{$orient}{mainaxis}} = {num=>$num, step=>$step, start=>$start, end=>$end};
+        vprintf(2, "$orient STEP $step START $start\n");
+        $slices_ix{$targetkey}{$orient} = [map {{mm=>$_,ix=>round(($_ - $start)/$step)}} @{$slicesref->{$orient}}];
+    }
+}
+
+sub round {
+    return int($_[0] + 0.5);
+}
+
+sub calcposition {
+    my $srcval = shift;
+    my $srcmin = shift;
+    my $srcmax = shift;
+    return undef if ($srcval < $srcmin or $srcval > $srcmax);
+    my $destmin = shift;
+    my $destmax = shift;
+    my $destval = ($srcval - $srcmin)/($srcmax - $srcmin) * ($destmax - $destmin) + $destmin;
+    return $destval;
+}
+
+sub maketicksdrawstring {
+    my $orient = shift;
+    my $hpx = shift;
+    my $vpx = shift;
+    my $slicemark = shift || [];
+    my $tickstring = '';
+    my $targetmax;
+
+    # slice marks
+    if (@{$slicemark} and not $options{no_marks}) {
+        $tickstring .= qq( -fill '#CC0' -stroke none -draw ");
+        
+        my %slicemarkpos = (xspace=>$slicemark->[0], yspace=>$slicemark->[1], zspace=>$slicemark->[2]);
+        my $strokelength = round($layout{px}{strokelengthmajor}*1);
+        my $strokeaspect = 0.7;
+        foreach my $axis (qw(h v)) {
+            my $dim = $orients{$orient}{$axis}[0];
+            my @sourcerange = ($axismmdimensions{anat}{$dim}{start},$axismmdimensions{anat}{$dim}{end});
+
+            if ($hpx > 0) {
+                $targetmax = ($axis eq 'h'? $hpx : $vpx) - 1;
+            } else {
+                $targetmax = $axismmdimensions{anat}{$dim}{num}*abs($axismmdimensions{anat}{$dim}{step})-1;
+            }
+            my @targetrange = ($orients{$orient}{$axis}[1] == -1? ($targetmax,0):(0,$targetmax));
+            
+            
+            my $pos = round(calcposition($slicemarkpos{$dim},@sourcerange,@targetrange));
+            
+            if ($axis eq 'h') {
+                #$tickstring .= sprintf 'line %u,0 %u,%u line %u,%u %u,%u ', $pos, $pos,$strokelength, $pos,($vpx-1), $pos,($vpx - $strokelength - 1); #qq(line $pos,0 $pos,$sl[1] line $pos,0 $pos,$sl[1] );
+                $tickstring .= sprintf 'polygon %u,0 %u,%u %u,0 ', $pos - $strokelength*$strokeaspect, $pos,$strokelength, $pos + $strokelength*$strokeaspect;
+                $tickstring .= sprintf 'polygon %u,%u %u,%u %u,%u ', $pos - $strokelength*$strokeaspect,($vpx-1), $pos,($vpx - $strokelength - 1), $pos + $strokelength*$strokeaspect, ($vpx-1);
+            } else {
+                $tickstring .= sprintf 'polygon 0,%u %u,%u 0,%u ', $pos - $strokelength*$strokeaspect, $strokelength,$pos, $pos + $strokelength/2;
+                $tickstring .= sprintf 'polygon %u,%u %u,%u %u,%u ', ($hpx-1),$pos - $strokelength*$strokeaspect, ($hpx - $strokelength - 1),$pos, ($hpx-1),$pos + $strokelength*$strokeaspect;
+            }
+        }
+        $tickstring .= '"';
+    }
+    
+    # ticks
+    if ($options{tickinterval}) {
+        $tickstring .= qq( -fill none -stroke white -strokewidth $layout{px}{strokewidth} -draw ");
+        foreach my $axis (qw(h v)) {
+            my $dim = $orients{$orient}{$axis}[0];
+            my @sourcerange = ($axismmdimensions{anat}{$dim}{start},$axismmdimensions{anat}{$dim}{end});
+            if ($hpx > 0) {
+                $targetmax = ($axis eq 'h'? $hpx : $vpx) - 1;
+            } else {
+                $targetmax = $axismmdimensions{anat}{$dim}{num}*abs($axismmdimensions{anat}{$dim}{step})-1;
+            }
+            my @targetrange = ($orients{$orient}{$axis}[1] == -1? ($targetmax,0):(0,$targetmax));
+            
+            my @pos = (round(calcposition(0,@sourcerange,@targetrange)));
+            my $mm = $options{tickinterval};
+            
+            while ($mm < $sourcerange[1]) {
+                push @pos, round(calcposition($mm,@sourcerange,@targetrange));
+                $mm += $options{tickinterval};
+            }
+        
+            $mm = -1*$options{tickinterval};
+            while ($mm > $sourcerange[0]) {
+                push @pos, round(calcposition($mm,@sourcerange,@targetrange));
+                $mm -= $options{tickinterval};
+            }
+            
+            $tickstring .= formatticks($axis,@pos);
+        }
+        $tickstring .= '"';
+    }
+    
+    return $tickstring;
+}
+
+sub formatticks {
+    my $axis = shift;
+    my $zero = shift;
+    my $scalelength = 1; # shift || 
+    my (@sl) = ($scalelength*$layout{px}{strokelengthminor},$scalelength*$layout{px}{strokelengthmajor});
+    if ($axis eq 'h') {
+        return qq(line $zero,0 $zero,$sl[1] ) . join(' ', map {"line $_,0 $_,$sl[0]"} @_) . q( );
+    } else {
+        return qq(line 0,$zero $sl[1],$zero ) . join(' ', map {"line 0,$_ $sl[0],$_"} @_) . q( );
+    }
+}
+
+sub build_colorbar {
+    # dump colorbar
+    runcmd(sprintf q(minccalc -quiet -expression "%f*(A[0]*%f+%f)" '%s' '%s/colorbarpos.mnc'), 1, ($options{tceiling} - $options{tthresh}), $options{tthresh}, $options{colorbarfile}, $options{tempdir});
+    runcmd(sprintf q(minccalc -quiet -expression "-1*A[0]" '%s/colorbarpos.mnc' '%s/colorbarneg.mnc'), $options{tempdir}, $options{tempdir});
+    my $colorparams = qq(-lookup "-range $options{tfloor} $options{tceiling} -lookup_table $options{lookuptable}");
+    runcmd(qq(mincpik -transverse -slice 0 -scale 1 $colorparams "$options{tempdir}/colorbarpos.mnc" $options{tempdir}/colorbarpos.png));
+    runcmd(qq(mincpik -transverse -slice 0 -scale 1 $colorparams "$options{tempdir}/colorbarneg.mnc" $options{tempdir}/colorbarneg.png));
+    my $mid = ($options{tthresh} + $options{tceiling})/2;
+    my $drawextra_stroke = '';
+    my $drawextra_text = '';
+    $layout{px}{marginh} = round($layout{px}{tilew}/11);
+    $layout{px}{colorbartilew} = round($layout{px}{tilew}*2/3);
+    $layout{px}{colorbarw} = round($layout{px}{colorbartilew}*2/5);
+    $layout{px}{colorbar2xoff} = round($layout{px}{colorbartilew}*3/5);
+    $layout{px}{colorbarh} = round($layout{px}{tilew} - $layout{px}{marginh}*2);
+    $layout{px}{textxoff} = round($options{pagedpi}/24);
+    $layout{px}{textyspace} = round($options{pagedpi}/18);
+    $layout{px}{textyshim} = round($options{pagedpi}/60);
+    $layout{px}{barcenterxtrans} = round(-1*$layout{px}{colorbartilew}*3/10);
+    $layout{px}{bar2centerxtrans} = round($layout{px}{colorbartilew}*3/10);
+    my $textsize_colorbar = sprintf '%.1f', $layout{px}{tilew}/45;
+    my @drawmid = (1,1);
+    if (length($options{marktvalue})) {
+        $options{marktvalue} =~ s/\+-([0-9.]+)/$1,-$1/g;
+        my ($ypos,$yneg);
+        foreach (split /,/, $options{marktvalue}) {
+            $ypos = calcposition($_,$options{tthresh},$options{tceiling},$layout{px}{colorbarh}+$layout{px}{marginh},$layout{px}{marginh});
+            $yneg = calcposition($_,-1*$options{tceiling},-1*$options{tthresh},$layout{px}{marginh},$layout{px}{colorbarh}+$layout{px}{marginh});
+            if (defined $ypos) {
+                $drawextra_stroke .= sprintf q(line 0,%.0f %u,%.0f ), $ypos, $layout{px}{strokelengthminor}, $ypos;
+                $drawextra_text .= sprintf q(gravity West text %u,%.0f "%s" ), $layout{px}{textxoff}, $ypos-($layout{px}{tilew}/2), $_;
+                $drawmid[0] = 0 if ($ypos > $layout{px}{tilew}/2 - $layout{px}{textyspace} and $ypos < $layout{px}{tilew}/2 + $layout{px}{textyspace});
+            }
+            elsif (defined $yneg) {
+                $drawextra_stroke .= sprintf q(line %u,%.0f %u,%.0f ), $layout{px}{colorbar2xoff}, $yneg, $layout{px}{colorbar2xoff}+$layout{px}{strokelengthminor}, $yneg;
+                $drawextra_text .= sprintf q(gravity West text %u,%.0f "%s" ), $layout{px}{textxoff}+$layout{px}{colorbar2xoff}, $yneg-($layout{px}{tilew}/2), $_;
+                $drawmid[1] = 0 if ($yneg > $layout{px}{tilew}/2 - $layout{px}{textyspace} and $yneg < $layout{px}{tilew}/2 + $layout{px}{textyspace});
+            }
+        }
+    }
+    $drawextra_text .= qq(gravity Center text $layout{px}{barcenterxtrans},0 "$mid" ) if ($drawmid[0]);
+    $drawextra_text .= qq(gravity Center text $layout{px}{bar2centerxtrans},0 "-$mid" ) if ($drawmid[1]);
+    # hardcoding the density (dpi) so that text size scales properly
+    runcmd(qq(convert -density 300 -size $layout{px}{colorbartilew}x$layout{px}{tilew} xc:$options{pagebg} -pointsize $textsize_colorbar -fill '$options{pagetextcolor}' -draw 'image over 0,$layout{px}{marginh} $layout{px}{colorbarw},$layout{px}{colorbarh} "$options{tempdir}/colorbarpos.png" image over $layout{px}{colorbar2xoff},$layout{px}{marginh} $layout{px}{colorbarw},$layout{px}{colorbarh} "$options{tempdir}/colorbarneg.png" gravity South text $layout{px}{barcenterxtrans},0 "$options{tthresh}" gravity North text $layout{px}{barcenterxtrans},$layout{px}{textyshim} "$options{tceiling}" gravity South text $layout{px}{bar2centerxtrans},0 "-$options{tthresh}" gravity North text $layout{px}{bar2centerxtrans},$layout{px}{textyshim} "-$options{tceiling}"' -fill White -strokewidth $layout{px}{strokewidth} -draw 'gravity Center $drawextra_text' -strokewidth $layout{px}{strokewidth} -stroke White -draw '$drawextra_stroke' $options{tempdir}/colorbar.png));
+    return $colorparams;
+}
+
+sub getfileandpath {
+    my $filefull = shift;
+    my ($path, $file);
+    if ($filefull =~ m(/|\\)) {
+        ($path,$file) = $filefull =~ m|^(.+)[\\\/]([^\\\/]+)$|;
+    } else {
+        $path = Cwd::cwd();
+        $file = $filefull;
+    }
+    return ($file,$path);
+}
+
+sub tags_read {
+    my $filename = shift;
+    open my($fh), $filename or die "Can't open $filename: $!\n";
+    my @tags = ();
+    while ($_ = <$fh> and not /Points =/) { }
+    while (<$fh>) {
+        chomp;
+        s/^\s+//;
+        my @tag = split /\s+/, $_, 7;
+        $tag[6] =~ s/;$//;
+        $tag[6] =~ s/^"|"$//g; # trim quotes if present
+        push @tags, [@tag];
+    }
+    close $fh;
+    # ASSUME tag label is T value. Sort by ABSOLUTE value, descending
+    @tags = sort {abs($b->[6]) <=> abs($a->[6])} @tags;
+    if ($options{maxtags} > 0  and  $#tags >= $options{maxtags}) {
+        $#tags = $options{maxtags} - 1;
+    }
+    return @tags;
+}
