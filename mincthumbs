@@ -72,10 +72,17 @@ Usage: mincthumbs [options] fmrifile1 [fmrifile2 ....] anatfile
 #  * Anatomicals and functionals needn't be at the same resolution (step size) but
 #    they still must be in the same space (axis cosines and start/end positions).
 
+my $script_dir = ($0 =~ m|^(.+)/|)[0];
+$script_dir = '.'  unless (length($script_dir) and -d $script_dir);
 
 my ($config, $config_info) = build_config([
     version => { default => 'Dev 14/Oct/2013', },
     cmdline => { default => join(' ', $0, @ARGV) },
+    dependencies => { default => {
+        required => [ qw(mincinfo mincpik minccalc convert montage) ],
+        optional => [ qw(ps2pdf) ],
+        found => {}
+    }},
     tempdir => { default => "/tmp/mincthumbs-$$" },
     colorbarfile => { default => "$script_dir/mincthumbs_colorbar.mnc", },
     lookuptable => { default => "$script_dir/colormap_spectral2.txt", },
@@ -280,6 +287,7 @@ my ($config, $config_info) = build_config([
 ]);
 my @extra_args = process_command_line($config, $config_info); # will exit with usage if necessary
 
+check_external_dependencies(); # will die here if required tools are not found
 
 # version
 if ($config->{verbose} == -10) {
@@ -577,6 +585,7 @@ sub build_pdf {
     }
     close $fh;
     close $fh2;
+    assert_external_dependency('ps2pdf', "PDF files can only be created if the ps2pdf utility is found");
     runcmd(sprintf q(ps2pdf -dPDFSETTINGS=/prepress -dDEVICEWIDTHPOINTS=%u -dDEVICEHEIGHTPOINTS=%u '%s/ALL-mont2.ps' '%s'), $layout{px}{pagew}/$config->{pagedpi}*72, $layout{px}{pageh}/$config->{pagedpi}*72, $config->{tempdir}, $pdffile);
     # To do a lossless compression of the images, I used:  ps2pdf -dAutoFilterColorImages=false -dColorImageFilter=/FlateEncode
     #
@@ -1148,6 +1157,37 @@ sub tags_read {
     return @tags;
 }
 
+########################## Other util
+
+sub check_external_dependencies {
+    my $errs = 0;
+    foreach my $util (@{$config->{dependencies}{required}}) {
+        if (system("which $util >/dev/null")) {
+            $errs++;
+            print "** Required utility not found: $util\n";
+        } else {
+            $config->{dependencies}{found}{$util} = 1;
+        }
+    }
+    foreach my $util (@{$config->{dependencies}{optional}}) {
+        if (!system("which $util >/dev/null")) {
+            $config->{dependencies}{found}{$util} = 1;
+        }
+    }
+    if ($errs > 0) {
+        die '';
+    }
+}
+
+sub assert_external_dependency {
+    my $util = shift;
+    my $message = shift;
+    $message ||= "External dependency not found: $util";
+    if (system("which $util >/dev/null")) {
+        print "* $message\n";
+        die;
+    }
+}
 
 ########################## Command line processing
 
