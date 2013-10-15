@@ -101,7 +101,7 @@ my ($config, $config_info) = build_config([
         default => 3,
         type => 'float',
         help => 'Threshold value for stats images. Voxels below this value (or for negative -tthresh values, above this value) will be masked to transparent. Note that for aesthetic reasons, it is not an exact cutoff; see -tblendradius.',
-        params => ['tthresh'],
+        params => ['-tthresh'],
     },
     tceiling => {
         default => 10,
