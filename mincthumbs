@@ -281,9 +281,6 @@ my ($config, $config_info) = build_config([
 my @extra_args = process_command_line($config, $config_info); # will exit with usage if necessary
 
 
-#### get and manipulate command line options
-my @extra_args = ();
-
 # version
 if ($config->{verbose} == -10) {
     print "Version: $config->{version}\n\n";
