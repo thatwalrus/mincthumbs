@@ -77,8 +77,8 @@ my ($config, $config_info) = build_config([
     version => { default => 'Dev 14/Oct/2013', },
     cmdline => { default => join(' ', $0, @ARGV) },
     tempdir => { default => "/tmp/mincthumbs-$$" },
-    colorbarfile => { default => '/home/nick/util/mincthumbs_colorbar.mnc', },
-    lookuptable => { default => '/home/nick/util/colormap_spectral2.txt', },
+    colorbarfile => { default => "$script_dir/mincthumbs_colorbar.mnc", },
+    lookuptable => { default => "$script_dir/colormap_spectral2.txt", },
     pdfapi2 => { default => 0, },
     tagfile => { default => '', },
 
