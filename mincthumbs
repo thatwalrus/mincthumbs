@@ -72,7 +72,8 @@ Usage: mincthumbs [options] fmrifile1 [fmrifile2 ....] anatfile
 #  * Anatomicals and functionals needn't be at the same resolution (step size) but
 #    they still must be in the same space (axis cosines and start/end positions).
 
-my $script_dir = ($0 =~ m|^(.+)/|)[0];
+my $script_canonical = Cwd::abs_path($0);
+my $script_dir = ($script_canonical =~ m|^(.+)/|)[0];
 $script_dir = '.'  unless (length($script_dir) and -d $script_dir);
 
 my ($config, $config_info) = build_config([
