@@ -86,7 +86,7 @@ my ($config, $config_info) = build_config([
     }},
     tempdir => { default => "/tmp/mincthumbs-$$" },
     colorbarfile => { default => "$script_dir/mincthumbs_colorbar.mnc", },
-    lookuptable => { default => "$script_dir/colormap_spectral2.txt", },
+    lookuptable_spectral => {default => '0 0.3 0 0.3;0.05 0.4667 0 0.5333;0.1 0.5333 0 0.6;0.15 0 0 0.6667;0.2 0 0 0.8667;0.25 0 0.4667 0.8667;0.3 0 0.6 0.8667;0.35 0 0.6667 0.6667;0.4 0 0.6667 0.5333;0.45 0 0.6 0;0.5 0 0.7333 0;0.55 0 0.8667 0;0.6 0 1 0;0.65 0.7333 1 0;0.7 0.9333 0.9333 0;0.75 1 0.8 0;0.8 1 0.6 0;0.85 1 0 0;0.9 0.8667 0 0;0.95 0.8 0 0;1 1.0 0.85 0.85;' },
     pdfapi2 => { default => 0, },
     tagfile => { default => '', },
 
@@ -819,7 +819,10 @@ sub render_tile {
         #print "TMAP $tiledef->{orient} SLICE $tiledef->{statslice}\n";
         # dump stats slice
         $tiledef->{statpng} = "$config->{tempdir}/stat-$tiledef->{orient}-$tiledef->{statslice}.png";
-        runcmd(qq(mincpik -clobber -$tiledef->{orient} -slice $tiledef->{statslice} -scale 1 $tiledef->{colorparams} '$tiledef->{statmnc}' '$tiledef->{statpng}'));
+        open my $ph, "| mincpik -clobber -$tiledef->{orient} -slice $tiledef->{statslice} -scale 1 $tiledef->{colorparams} '$tiledef->{statmnc}' '$tiledef->{statpng}'" or die $!;
+        foreach my $line (split /;/, $config->{lookuptable_spectral}) { print $ph "$line\n"; }
+        close $ph;
+
         # dump alpha slice
         $tiledef->{statalphapng} = "$config->{tempdir}/alpha-$tiledef->{orient}-$tiledef->{statslice}.png";
         runcmd(qq(mincpik -clobber -$tiledef->{orient} -slice $tiledef->{statslice} -scale 1 -image_range 0 1 '$tiledef->{parentfile}{simg}{alphamnc}' '$tiledef->{statalphapng}'));
@@ -1081,9 +1084,13 @@ sub build_colorbar {
     # dump colorbar
     runcmd(sprintf q(minccalc -quiet -expression "%f*(A[0]*%f+%f)" '%s' '%s/colorbarpos.mnc'), 1, ($config->{tceiling} - $config->{tthresh}), $config->{tthresh}, $config->{colorbarfile}, $config->{tempdir});
     runcmd(sprintf q(minccalc -quiet -expression "-1*A[0]" '%s/colorbarpos.mnc' '%s/colorbarneg.mnc'), $config->{tempdir}, $config->{tempdir});
-    my $colorparams = qq(-lookup "-range $config->{tfloor} $config->{tceiling} -lookup_table $config->{lookuptable}");
-    runcmd(qq(mincpik -transverse -slice 0 -scale 1 $colorparams "$config->{tempdir}/colorbarpos.mnc" $config->{tempdir}/colorbarpos.png));
-    runcmd(qq(mincpik -transverse -slice 0 -scale 1 $colorparams "$config->{tempdir}/colorbarneg.mnc" $config->{tempdir}/colorbarneg.png));
+    my $colorparams = qq(-lookup '-range $config->{tfloor} $config->{tceiling} -lookup_table -');
+    open my $ph, "| mincpik -transverse -slice 0 -scale 1 $colorparams '$config->{tempdir}/colorbarpos.mnc' $config->{tempdir}/colorbarpos.png" or die $!;
+    foreach my $line (split /;/, $config->{lookuptable_spectral}) { print $ph "$line\n"; }
+    close $ph;
+    open my $ph, "| mincpik -transverse -slice 0 -scale 1 $colorparams '$config->{tempdir}/colorbarneg.mnc' $config->{tempdir}/colorbarneg.png" or die $!;
+    foreach my $line (split /;/, $config->{lookuptable_spectral}) { print $ph "$line\n"; }
+    close $ph;
     my $mid = ($config->{tthresh} + $config->{tceiling})/2;
     my $drawextra_stroke = '';
     my $drawextra_text = '';
