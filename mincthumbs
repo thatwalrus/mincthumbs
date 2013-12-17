@@ -76,6 +76,11 @@ my $script_canonical = Cwd::abs_path($0);
 my $script_dir = ($script_canonical =~ m|^(.+)/|)[0];
 $script_dir = '.'  unless (length($script_dir) and -d $script_dir);
 
+my $aliases = {
+    'bare' => [qw(-nomarks -tickinterval 0 -nomidt)],
+};
+expand_command_line_aliases($aliases);
+
 my ($config, $config_info) = build_config([
     version => { default => 'Dev 14/Oct/2013', },
     cmdline => { default => join(' ', $0, @ARGV) },
@@ -88,7 +93,7 @@ my ($config, $config_info) = build_config([
     colorbarfile => { default => "$script_dir/mincthumbs_colorbar.mnc", },
     lookuptable_spectral => {default => '0 0.3 0 0.3;0.05 0.4667 0 0.5333;0.1 0.5333 0 0.6;0.15 0 0 0.6667;0.2 0 0 0.8667;0.25 0 0.4667 0.8667;0.3 0 0.6 0.8667;0.35 0 0.6667 0.6667;0.4 0 0.6667 0.5333;0.45 0 0.6 0;0.5 0 0.7333 0;0.55 0 0.8667 0;0.6 0 1 0;0.65 0.7333 1 0;0.7 0.9333 0.9333 0;0.75 1 0.8 0;0.8 1 0.6 0;0.85 1 0 0;0.9 0.8667 0 0;0.95 0.8 0 0;1 1.0 0.85 0.85;' },
     pdfapi2 => { default => 0, },
-    tagfile => { default => '', },
+    tagfile => { default => undef, },
 
     'Image data selection' => {type=>'section'},
     slices => {
@@ -124,11 +129,13 @@ my ($config, $config_info) = build_config([
     statpolarity => {
         default => 0,
         type => 'integer',
-        help => 'If set to 1 or -1, displays only positive or negative stats values, respectively.',
-        params => [{'-pos'=>1, '-neg'=>-1}],
+        params => [{
+            '-pos'=>{value=>1, help=>'Displays only positive stats values.'},
+            '-neg'=>{value=>-1, help=>'displays only negative stats values.'},
+        }],
     },
     statmaskimage => {
-        default => '',
+        default => undef,
         type => 'string',
         help => 'Mask to load from minc file. Must be in same resolution and space as the stats image. Will be thresholded at 0.5.',
         params => ['-maskimage'],
@@ -183,7 +190,10 @@ my ($config, $config_info) = build_config([
         default => 'orientseparate',
         type => 'string',
         help => q(Layout mode. Normally this will be set implicitly based on how slices/coordinates are specified. Use 'individual' or the shortcut argument -individual to output individual image files (.png by default; see -fmt).),
-        params => ['-layout', {'-individual'=>'individualtiles'}],
+        params => [
+            '-layout',
+            {'-individual'=>{value=>'individualtiles', help=>'Output individual image files (.png by default; see -fmt).'}},
+        ],
     },
     tickinterval => {
         default => 10,  #mm of original image
@@ -239,6 +249,12 @@ my ($config, $config_info) = build_config([
         help => 'Omit slice labels.',
         params => [{'-nolabels'=>1}],
     },
+    no_mid_t => {
+        default => 0,
+        type => 'integer',
+        help => 'Omit number label at midpoint of colorbar.',
+        params => [{'-nomidt'=>1}],
+    },
     maskasalpha => {
         default => 0,
         type => 'integer',
@@ -252,7 +268,7 @@ my ($config, $config_info) = build_config([
         params => [{'-maskanat'=>1}],
     },
     anatproc => {
-        default => '',
+        default => undef,
         type => 'string',
         help => 'Experimental.',
         params => ['-anatproc'],
@@ -260,7 +276,7 @@ my ($config, $config_info) = build_config([
 
     'Output' => {type => 'section'},
     pdffile => {
-        default => '',
+        default => undef,
         type => 'string',
         help => 'Destination PDF file (optional). In -individual mode, -out specifies the output directory (it will be created if necessary).',
         params => ['-out'],
@@ -272,7 +288,7 @@ my ($config, $config_info) = build_config([
         params => ['-fmt'],
     },
     fileprefix => {
-        default => '',
+        default => undef,
         type => 'string',
         help => 'An optional prefix for the name of output files.',
         params => ['-prefix'],
@@ -282,8 +298,11 @@ my ($config, $config_info) = build_config([
     verbose => {
         default => 1,
         type => 'integer',
-        help => 'Verbosity level. 0=Quiet output (only print errors); 1=default; 2=verbose; -10=Display program version and exit.',
-        params => [{'-q'=>0, '-v'=>2, '-version'=>-10}],
+        params => [{
+            '-q'=>{value=>0, help=>'Quiet output (only print errors)'},
+            '-v'=>{value=>2, help=>'Verbose output.'},
+            '-version'=>{value=>-10, help=>'Display program version and exit.'}
+        }],
     },
 ]);
 my @extra_args = process_command_line($config, $config_info); # will exit with usage if necessary
@@ -477,6 +496,8 @@ if ($config->{layoutorder} eq 'individualtiles') {
     } else {
         $config->{pdffile} = '.';
     }
+} else {
+    assert_external_dependency('ps2pdf', "PDF files can only be created if the ps2pdf utility is found");
 }
 
 # dump anatomical slices
@@ -1101,7 +1122,7 @@ sub build_colorbar {
     $layout{px}{barcenterxtrans} = round(-1*$layout{px}{colorbartilew}*3/10);
     $layout{px}{bar2centerxtrans} = round($layout{px}{colorbartilew}*3/10);
     my $textsize_colorbar = sprintf '%.1f', $layout{px}{tilew}/45;
-    my @drawmid = (1,1);
+    my @drawmid = $config->{no_mid_t}? (0,0) : (1,1);
     if (length($config->{marktvalue})) {
         $config->{marktvalue} =~ s/\+-([0-9.]+)/$1,-$1/g;
         my ($ypos,$yneg);
@@ -1195,6 +1216,20 @@ sub assert_external_dependency {
 
 ########################## Command line processing
 
+sub expand_command_line_aliases {
+    my $aliases = shift;
+    for (my $i=0; $i<=$#ARGV; $i++) {
+        if ($ARGV[$i] =~ /^\@([a-z0-9_]+)$/) {
+            my $alias_key = $1;
+            if (exists $aliases->{$alias_key}) {
+                splice @ARGV, $i, 1, @{$aliases->{$alias_key}};
+                printf "Expanded alias \@%s:  %s\n", $alias_key, join(' ', @{$aliases->{$alias_key}});
+            } else {
+                die "Parameter alias does not exist: \@$alias_key";
+            }
+        }
+    }
+}
 
 sub process_command_line {
     my $config = shift;
@@ -1231,9 +1266,15 @@ sub build_config {
                 foreach my $param_source (@{$data->{params}}) {
                     if (ref($param_source) eq 'HASH') {
                         foreach my $param_name (keys %{$param_source}) {
-                            my $help = sprintf('%s [value: %s]', $data->{help}, $param_source->{$param_name});
+                            my $param_def = {};
+                            if (ref($param_source->{$param_name}) eq 'HASH') {
+                                $param_def = $param_source->{$param_name};
+                            } else {
+                                $param_def = { value => $param_source->{$param_name} };
+                            }
+                            my $help = $param_def->{help}||$data->{help};
                             push @{$config_info}, [
-                                $param_name, 'const', $param_source->{$param_name}, \$config->{$key}, $help
+                                $param_name, 'const', $param_def->{value}, \$config->{$key}, $help
                             ];
                         }
                     }
