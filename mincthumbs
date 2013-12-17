@@ -166,6 +166,12 @@ my ($config, $config_info) = build_config([
         help => 'Increase the contrast of the anatomical image. No processing is applied when the value is 0. This option is experimental and likely to change.',
         params => ['-contrast'],
     },
+    anatlevels => {
+        default => undef,
+        type => 'string',
+        help => 'Adjust the intensity levels of the anatomical image. Format: "D,L,M", where D is the amount to darken low values (0-100), L is the amount to lighten high values (0-100), and M is the midrange adjustment (0-2 where 1 is no adjustment). This option is experimental and likely to change.',
+        params => ['-levels'],
+    },
     anateq => {
         default => 0,
         type => 'integer',
@@ -863,6 +869,10 @@ sub render_tile {
     $extraanatproc .= '-black-threshold 800 -equalize ' if ($config->{anateq});
     foreach (1..$config->{anatcontrast}) {
         $extraanatproc .= '-contrast ';
+    }
+    if ($config->{anatlevels}) {
+        my @bits = split /,/, $config->{anatlevels};
+        $extraanatproc .= sprintf('-level %.0f%%,%.0f%%,%.2f', $bits[0], (100-$bits[1]), $bits[2]);
     }
     $extraanatproc .= '-unsharp 2x2+1 ' if ($config->{anatsharpen});
 
