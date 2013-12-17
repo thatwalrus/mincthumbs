@@ -541,8 +541,6 @@ if (@extra_args) {
         };
     }
 } else {
-
-if (1) {
     # dump stats images and create pdf montages
     my $tempdir = "$config->{tempdir}/anat";
     runcmd("mkdir -p $tempdir");
@@ -555,7 +553,6 @@ if (1) {
             #alphamnc => "$tempdir/alpha.mnc",
             #key => $key,
     };
-}
 }
 
 # build entire layout, generate output
@@ -586,7 +583,6 @@ sub build_pdf {
     }
     close $fh;
     close $fh2;
-    assert_external_dependency('ps2pdf', "PDF files can only be created if the ps2pdf utility is found");
     runcmd(sprintf q(ps2pdf -dPDFSETTINGS=/prepress -dDEVICEWIDTHPOINTS=%u -dDEVICEHEIGHTPOINTS=%u '%s/ALL-mont2.ps' '%s'), $layout{px}{pagew}/$config->{pagedpi}*72, $layout{px}{pageh}/$config->{pagedpi}*72, $config->{tempdir}, $pdffile);
     # To do a lossless compression of the images, I used:  ps2pdf -dAutoFilterColorImages=false -dColorImageFilter=/FlateEncode
     #
