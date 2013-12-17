@@ -142,7 +142,7 @@ my ($config, $config_info) = build_config([
         params => ['-blend'],
     },
     tblendradius => {
-        default => 0.5, #units of t
+        default => 0.05, #units of t
         type => 'float',
         help => q(Values around the T threshold are semitransparent, ranging from completely transparent at Tthresh-Tblendradius to completely opaque at Tthresh+Tblendradius. A smaller value makes region edges more crisp/blocky, and a larger value can result in 'wispy' regions. Must not be zero.),
         params => ['-tblendradius'],
