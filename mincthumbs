@@ -986,10 +986,9 @@ sub load_filedimensions {
     my $targetkey = shift;
 
     my $mincinfoout = `mincinfo '$filename'`;
-
     my ($orient,$step,$start,$num,$end);
     foreach $orient (keys %orients) {
-        ($num,$step,$start) = ($mincinfoout =~ /^\s+$orients{$orient}{mainaxis}\s+(\d+)\s+([-0-9]+)\s+([-0-9]+)/m);
+        ($num,$step,$start) = ($mincinfoout =~ /^\s+$orients{$orient}{mainaxis}\s+(\d+)\s+([-0-9.]+)\s+([-0-9.]+)/m);
         $end = $start+$num*$step;
         if ($targetkey ne 'anat'  and  exists $axismmdimensions{anat}) {
             # verify that this image is in exactly the same space (not checking cosines though - just start and end)
