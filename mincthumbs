@@ -368,6 +368,7 @@ my %orients = (
     sagittal   => {mainaxis=>'xspace', h => ['yspace',1], v => ['zspace',-1]},
     transverse => {mainaxis=>'zspace', h => ['xspace',1], v => ['yspace',-1]},
 );
+my %orient_alias = ('x'=>'sagittal', 'y'=>'coronal', 'z'=>'transverse', 'axial'=>'transverse', 'horizontal'=>'transverse');
 my %axismmdimensions = (anat=>{}, overlay=>{});
 @_ = split /x/, $config->{pagedim};
 my %slicelist = (map {$_=>[]} keys %orients);  # the slice locations will be in mm - they're not integer slice indexes
@@ -419,14 +420,15 @@ if (-f $config->{slices}) {
             push @{$slicelist{labels}}, sprintf('%i  %i  %i', $_[1], $_[2], $_[3]);
             @orient_wanted = qw(transverse coronal sagittal);
         }
-        elsif ($orients{$_[0]}) {
-            push @orient_wanted, $_[0];
+        elsif ($orients{$_[0]} || $orient_alias{$_[0]}) {
+            my $this_orient = $orient_alias{$_[0]} || $_[0];
+            push @orient_wanted, $this_orient;
             if (/:/) {
-                $slicelist{$_[0]} = [numseries(@_[2,3,1])];
+                $slicelist{$this_orient} = [numseries(@_[2,3,1])];
             } else {
-                $slicelist{$_[0]} = [@_[1..$#_]];
+                $slicelist{$this_orient} = [@_[1..$#_]];
             }
-            vprintf(2, "$_[0] slices: " . join(',',@{$slicelist{$_[0]}}) . "\n");
+            vprintf(2, "$this_orient slices: " . join(',',@{$slicelist{$this_orient}}) . "\n");
         }
         else {
             die "$_[0] is not a valid slice orientation\n";
