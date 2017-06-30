@@ -872,7 +872,7 @@ sub render_tile {
     }
     if ($config->{anatlevels}) {
         my @bits = split /,/, $config->{anatlevels};
-        $extraanatproc .= sprintf('-level %.0f%%,%.0f%%,%.2f', $bits[0], (100-$bits[1]), $bits[2]);
+        $extraanatproc .= sprintf('-level %.0f%%,%.0f%%,%.2f ', $bits[0], (100-$bits[1]), $bits[2]);
     }
     $extraanatproc .= '-unsharp 2x2+1 ' if ($config->{anatsharpen});
 
