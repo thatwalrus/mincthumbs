@@ -917,7 +917,7 @@ sub build_page {
                         $tiledef->{orient},
                         $tiledef->{worldpos},
                         $config->{outformat};
-                print "INDIV FILE $destfile\n";
+                print "Writing image $destfile\n";
                 #runcmd(qq(cp $tiledef->{outfile} $destfile));
                 my $hist = $config->{cmdline};
                 $hist =~ s/'/\\'/g;
