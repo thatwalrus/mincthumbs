@@ -80,7 +80,7 @@ my $script_dir = ($script_canonical =~ m|^(.+)/|)[0];
 $script_dir = '.'  unless (length($script_dir) and -d $script_dir);
 
 my ($config, $config_info) = build_config([
-    version => { default => 'Dev 14/Oct/2013', },
+    version => { default => 'Dev 10/Jul/2017', },
     cmdline => { default => join(' ', $0, @ARGV) },
     dependencies => { default => {
         required => [ qw(mincinfo mincpik minccalc convert montage) ],
