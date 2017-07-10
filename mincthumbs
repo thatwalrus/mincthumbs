@@ -213,6 +213,12 @@ my ($config, $config_info) = build_config([
         help => 'Mark a particular T value on the colorbar (optional).',
         params => ['-markt'],
     },
+    decimal_places_mm => {
+        default => 0,
+        type => 'integer',
+        help => 'Number of decimal places for mm values in labels and filenames',
+        params => ['-decimals'],
+    },
     pagedpi => {
         default => 150,
         type => 'integer',
@@ -281,10 +287,10 @@ my ($config, $config_info) = build_config([
     },
 
     'Output' => {type => 'section'},
-    pdffile => {
+    out_target => {
         default => undef,
         type => 'string',
-        help => 'Destination PDF file (optional). In -individual mode, -out specifies the output directory (it will be created if necessary).',
+        help => 'For montage, specifies destination PDF file (optional). In -individual mode, specifies the output directory (will be created if necessary).',
         params => ['-out'],
     },
     outformat => {
@@ -499,10 +505,12 @@ if (-d $config->{tempdir}) {
 }
 
 if ($config->{layoutorder} eq 'individualtiles') {
-    if ($config->{pdffile}) {
-        runcmd(qq(mkdir -p '$config->{pdffile}'));
+    if ($config->{out_target}) {
+        $config->{out_target_base} = base_output_directory($config->{out_target});
+        runcmd(qq(mkdir -p '$config->{out_target_base}'));
     } else {
-        $config->{pdffile} = '.';
+        $config->{out_target} = '.';
+        $config->{out_target_base} = $config->{out_target};
     }
 } else {
     assert_external_dependency('ps2pdf', "PDF files can only be created if the ps2pdf utility is found");
@@ -632,7 +640,7 @@ sub build_layout {
 
     my @sectiondefs = ();
     my ($tilew,$tileh);
-    if ($config->{layoutorder} eq 'tcs_3h' or @tags) {
+    if ($config->{layoutorder} eq 'tcs_3h'  or @tags) {
         my $aimgdef = shift @imagefiledefs;
         @imagefiledefs = ($aimgdef) unless (@imagefiledefs);
         foreach my $simgdef (@imagefiledefs) {
@@ -669,6 +677,7 @@ sub build_layout {
                         ticksdraw => maketicksdrawstring($orient,$thistilew,$thistileh,$tags[$i]),
                         parentsection => $sectiondef,
                         parentfile => $filedef,
+                        coord_text => sprintf('%s_%s_%s', round_values($config->{decimal_places_mm}, @{$tags[$i]}[0,1,2])),
                       };
                     if ($simgdef->{type} eq 'overlay') {
                         # it's a stats image so add info needed for overlay
@@ -712,6 +721,7 @@ sub build_layout {
                         ticksdraw => maketicksdrawstring($orient,$tilew,$tileh),
                         parentsection => $sectiondef,
                         parentfile => $filedef,
+                        coord_text => sprintf('%s_%s', $orient, round_values($config->{decimal_places_mm}, $slices_ix{anat}{$orient}[$i]{mm})),
                       };
                     if ($simgdef->{type} eq 'overlay') {
                         # it's a stats image that will need to be overlaid
@@ -735,9 +745,9 @@ sub build_layout {
     # individualtiles? copy colorbar
     if ($config->{layoutorder} eq 'individualtiles') {
         if ($config->{outformat} eq 'png') {
-            runcmd(qq(cp $config->{tempdir}/colorbar.png $config->{pdffile}/));
+            runcmd(qq(cp $config->{tempdir}/colorbar.png $config->{out_target_base}/));
         } else {
-            runcmd(qq(convert $config->{tempdir}/colorbar.png $config->{pdffile}/colorbar.$config->{outformat}));
+            runcmd(qq(convert $config->{tempdir}/colorbar.png $config->{out_target_base}/colorbar.$config->{outformat}));
         }
     }
 
@@ -746,8 +756,8 @@ sub build_layout {
         # VERY BETA!
 
         foreach my $filedef (@{$layout->{files}}) {
-            if ($config->{pdffile}) {
-                $filedef->{outfile} = $config->{pdffile};
+            if ($config->{out_target}) {
+                $filedef->{outfile} = $config->{out_target};
             } else {
                 $filedef->{outfile} = $config->{fileprefix} . ($filedef->{simg}{file} || $filedef->{aimg}{file});
                 $filedef->{outfile} =~ s/.mnc$/_thumbs.pdf/ or die;
@@ -781,8 +791,8 @@ print "OUTPAGE $outpage\n";
         }
     } else {
         foreach my $filedef (@{$layout->{files}}) {
-            if ($config->{pdffile}) {
-                $filedef->{outfile} = $config->{pdffile};
+            if ($config->{out_target}) {
+                $filedef->{outfile} = $config->{out_target};
             } else {
                 $filedef->{outfile} = $filedef->{simg}{file} || $filedef->{aimg}{file};
                 $filedef->{outfile} =~ s/.mnc$/_thumbs.pdf/ or die;
@@ -819,9 +829,9 @@ sub build_section {
 
         if (scalar(@{$pagetiles}) >= $sectiondef->{tilesperpage} or (scalar(@{$pagetiles}) > 0 and not @tileslist)) {
             $page_filename = "$config->{tempdir}/montage-$sectiondef->{name}-$currentpage.jpg";
-            push @{$pagetiles}, {outfile=>"$config->{tempdir}/colorbar.png",rendered=>1}  if ($sectiondef->{addcolorbar});
+            push @{$pagetiles}, {outfile=>"$config->{tempdir}/colorbar.png", rendered=>1}  if ($sectiondef->{addcolorbar});
             my @titles = getfileandpath($sectiondef->{inputfile});
-            build_page(outfile=>$page_filename,sectiondef=>$sectiondef,title=>$titles[0],subtitle=>$titles[1],tiledefs=>$pagetiles);
+            build_page(outfile=>$page_filename, sectiondef=>$sectiondef, title=>$titles[0], subtitle=>$titles[1], tiledefs=>$pagetiles);
             push @outpages, $page_filename;
             $pagetiles = [];
             $currentpage++;
@@ -912,12 +922,14 @@ sub build_page {
             #individualtiles?
             if ($config->{layoutorder} eq 'individualtiles') {
                 next if ($tiledef->{outfile} =~ /colorbar.png/);
+                my $outdir = tile_output_directory($config->{out_target}, $tiledef);
+                ensure_directory_exists($outdir);
                 my $destfile = sprintf '%s/%s%s__%s_%s.%s',
-                        $config->{pdffile},
+                        $outdir,
                         $config->{fileprefix},
                         (($tiledef->{parentfile}{simg}{file}||$tiledef->{parentfile}{aimg}{file}) =~ m|([^/]+)\.[^\.]+$|i)[0] ||'',
                         $tiledef->{orient},
-                        $tiledef->{worldpos},
+                        round_values($config->{decimal_places_mm}, $tiledef->{worldpos}),
                         $config->{outformat};
                 print "Writing image $destfile\n";
                 #runcmd(qq(cp $tiledef->{outfile} $destfile));
@@ -934,6 +946,35 @@ sub build_page {
     my $montageyoff = $layout{px}{montageyextra} + $layout{px}{contentyoff};
     my $pagesubtitleyoff = round($layout{px}{montageyextra}*0.55 + $layout{px}{contentyoff});
     runcmd(qq(convert -density $config->{pagedpi} -size $layout{px}{pagew}x$layout{px}{pageh} xc:$config->{pagebg} -fill '$config->{pagetextcolor}' -pointsize 12 -draw "image Over $layout{px}{contentxoff},$montageyoff 0,0 '$pagedef{outfile}' gravity North text 0,$layout{px}{contentyoff} '$pagedef{title}'" -pointsize 7 -draw "gravity North text 0,$pagesubtitleyoff '$pagedef{subtitle}'" '$pagedef{outfile}'));
+}
+
+sub base_output_directory {
+    my $template = shift;
+    $template =~ s|/[^/]*{coord}[^/]*||;
+    return $template;
+}
+
+sub tile_output_directory {
+    my $template = shift;
+    my $tiledef = shift;
+
+    $template =~ s/{coord}/coord_$tiledef->{coord_text}/;
+    return $template;
+}
+
+sub ensure_directory_exists {
+    my $dir = shift;
+    my @bits = split('/', $dir);
+    my $test = ($dir =~ m|^/|? '/' : '');
+    while (@bits) {
+        my $thisbit = shift @bits;
+        next unless (length $thisbit);
+        $test .= '/' if ($test ne '/'  and  length $test);
+        $test .= $thisbit;
+        if (! -d $test) {
+            mkdir $test or die "Error creating directory $test ($!)";
+        }
+    }
 }
 
 sub runcmd {
@@ -1007,6 +1048,17 @@ sub load_filedimensions {
 
 sub round {
     return int($_[0] + 0.5);
+}
+
+sub round_values {
+    my $num_decimals = shift;
+    my $format = sprintf('%%.%uf', $num_decimals);
+    my @rounded = ();
+    while (@_) {
+        my $value = shift @_;
+        push @rounded, sprintf($format, $value);
+    }
+    return @rounded;
 }
 
 sub calcposition {
