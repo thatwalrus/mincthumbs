@@ -11,6 +11,9 @@ Usage: mincthumbs [options] fmrifile1 [fmrifile2 ....] anatfile
 
 =cut
 
+# BUGS:
+#  * Slice marks and ticks aren't visible even though they are in the imagemagick command
+#    lines. Not sure why.
 # TO DO:
 #  * -autofit scales down sagittals to the appropriate width; or rather, with
 #    -noautofit, coronals and horizontals will not be scaled to the full width.
@@ -75,11 +78,6 @@ Usage: mincthumbs [options] fmrifile1 [fmrifile2 ....] anatfile
 my $script_canonical = Cwd::abs_path($0);
 my $script_dir = ($script_canonical =~ m|^(.+)/|)[0];
 $script_dir = '.'  unless (length($script_dir) and -d $script_dir);
-
-my $aliases = {
-    'bare' => [qw(-nomarks -tickinterval 0 -nomidt)],
-};
-expand_command_line_aliases($aliases);
 
 my ($config, $config_info) = build_config([
     version => { default => 'Dev 14/Oct/2013', },
@@ -267,6 +265,12 @@ my ($config, $config_info) = build_config([
         help => 'Omit number label at midpoint of colorbar.',
         params => [{'-nomidt'=>1}],
     },
+    bare => {
+        default => 0,
+        type => 'integer',
+        help => 'Omit slice marks, ticks, and colorbar midpoint label. Shortcut for -nomarks -tickinterval 0 -nomidt.',
+        params => [{'-bare'=>1}],
+    },
     maskasalpha => {
         default => 0,
         type => 'integer',
@@ -325,6 +329,12 @@ check_external_dependencies(); # will die here if required tools are not found
 if ($config->{verbose} == -10) {
     print "Version: $config->{version}\n\n";
     exit;
+}
+# -bare
+if ($config->{bare}) {
+    $config->{no_marks} = 1;
+    $config->{tickinterval} = 0;
+    $config->{no_mid_t} = 1;
 }
 # tthresh must be positive
 $config->{tthresh} = abs($config->{tthresh});
@@ -411,7 +421,7 @@ if (-f $config->{slices}) {
         push @{$slicelist{transverse}}, $tag->[2];
         push @{$slicelist{coronal}}, $tag->[1];
         push @{$slicelist{sagittal}}, $tag->[0];
-        push @{$slicelist{labels}}, sprintf('%i  %i  %i   %.10s', $tag->[0], $tag->[1], $tag->[2], $tag->[6]);
+        push @{$slicelist{labels}}, sprintf('%s  %s  %s   %.10s', round_values($config->{decimal_places_mm}, $tag->[0], $tag->[1], $tag->[2]), $tag->[6]);
     }
     @orient_wanted = qw(transverse coronal sagittal);
 } else {
@@ -423,7 +433,7 @@ if (-f $config->{slices}) {
             push @{$slicelist{transverse}}, $_[3];
             push @{$slicelist{coronal}}, $_[2];
             push @{$slicelist{sagittal}}, $_[1];
-            push @{$slicelist{labels}}, sprintf('%i  %i  %i', $_[1], $_[2], $_[3]);
+            push @{$slicelist{labels}}, sprintf('%s  %s  %s', round_values($config->{decimal_places_mm}, $_[1], $_[2], $_[3]));
             @orient_wanted = qw(transverse coronal sagittal);
         }
         elsif ($orients{$_[0]} || $orient_alias{$_[0]}) {
@@ -665,7 +675,6 @@ sub build_layout {
                 foreach my $orient (@orient_wanted) {
                     my $thistileh = $layout{px}{orienttileh}{$orient}; #$orients{$orient}{v} * $scalefactor;
                     my $thistilew = $layout{px}{orienttilew}{$orient}; #$orients{$orient}{h} * $scalefactor;
-
                     my $tile = {
                         label => $slicelist{labels}[$i],
                         colorparams => $layout{colorparams},
@@ -1282,15 +1291,15 @@ sub assert_external_dependency {
 sub expand_command_line_aliases {
     my $aliases = shift;
     for (my $i=0; $i<=$#ARGV; $i++) {
-        if ($ARGV[$i] =~ /^\@([a-z0-9_]+)$/) {
-            my $alias_key = $1;
-            if (exists $aliases->{$alias_key}) {
-                splice @ARGV, $i, 1, @{$aliases->{$alias_key}};
-                printf "Expanded alias \@%s:  %s\n", $alias_key, join(' ', @{$aliases->{$alias_key}});
-            } else {
-                die "Parameter alias does not exist: \@$alias_key";
-            }
+        #if ($ARGV[$i] =~ /^\@([a-z0-9_]+)$/) {
+        my $alias_key = $ARGV[$i];
+        if (exists $aliases->{$alias_key}) {
+            splice @ARGV, $i, 1, @{$aliases->{$alias_key}};
+            printf "Expanded alias %s:  %s\n", $alias_key, join(' ', @{$aliases->{$alias_key}});
+        #} else {
+        #    die "Parameter alias does not exist: $alias_key";
         }
+        #}
     }
 }
 
